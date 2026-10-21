@@ -119,6 +119,18 @@ func prefetchBackoff(failCount int) time.Duration {
 // Get 获取缓存条目
 // 返回缓存的响应和是否命中。如果条目不存在或已过期，返回 nil, false。
 func (c *DnsCache) Get(key CacheKey) (*DnsResponse, bool) {
+	response, elapsed, minTTL, ok := c.lookup(key)
+	if !ok {
+		return nil, false
+	}
+	// Copy outside the lock. Set replaces a stored response and never edits it,
+	// so the copy is safe, and a large copy no longer blocks other cache calls.
+	return copyCachedResponse(response, elapsed, minTTL), true
+}
+
+// lookup finds a live entry and updates LRU order and stats while holding the lock.
+// It returns what Get needs to build the reply, without copying the response.
+func (c *DnsCache) lookup(key CacheKey) (*DnsResponse, time.Duration, int, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -126,14 +138,14 @@ func (c *DnsCache) Get(key CacheKey) (*DnsResponse, bool) {
 	if !ok {
 		c.stats.Misses++
 		c.updateHitRate()
-		return nil, false
+		return nil, 0, 0, false
 	}
 
 	entry, ok := elem.Value.(*CacheEntry)
 	if !ok {
 		c.stats.Misses++
 		c.updateHitRate()
-		return nil, false
+		return nil, 0, 0, false
 	}
 
 	now := time.Now()
@@ -142,7 +154,7 @@ func (c *DnsCache) Get(key CacheKey) (*DnsResponse, bool) {
 		c.removeElement(elem)
 		c.stats.Misses++
 		c.updateHitRate()
-		return nil, false
+		return nil, 0, 0, false
 	}
 
 	// 移动到链表头部（最近使用）
@@ -152,7 +164,7 @@ func (c *DnsCache) Get(key CacheKey) (*DnsResponse, bool) {
 	c.stats.Hits++
 	c.updateHitRate()
 
-	return copyCachedResponse(entry.Response, now.Sub(entry.StoredAt), c.config.MinTTL), true
+	return entry.Response, now.Sub(entry.StoredAt), c.config.MinTTL, true
 }
 
 func copyCachedResponse(response *DnsResponse, elapsed time.Duration, configuredMinTTL int) *DnsResponse {
