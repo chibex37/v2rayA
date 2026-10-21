@@ -465,6 +465,19 @@ func parseRoutingARules(rulesText string, inboundTag string) (rules []coreObj.Ro
 }
 
 func (t *Template) setTransparentRouting() (err error) {
+	// With DNS interception off in tun mode the core no longer relays port
+	// 53, so a query that still reaches the device must leave the host
+	// directly instead of joining the transparent proxy chain, which would
+	// send it to a proxy's port 53. The rule goes first so it wins over the
+	// mode's own rules.
+	if t.Setting.TransparentType == configure.TransparentTun && !dnsInterceptionEnabled(t.Setting) {
+		t.Routing.Rules = append([]coreObj.RoutingRule{{
+			Type:        "field",
+			InboundTag:  []string{"transparent"},
+			OutboundTag: "direct",
+			Port:        "53",
+		}}, t.Routing.Rules...)
+	}
 	defaultOutbound, _ := t.FirstProxyOutboundName(nil)
 	switch t.Setting.Transparent {
 	case configure.TransparentProxy:
@@ -496,8 +509,18 @@ func (t *Template) setTransparentRouting() (err error) {
 	return nil
 }
 func (t *Template) AppendDokodemoTProxy(tproxy string, port int, tag string) {
+	// Follow the "Allow connections from LAN" (PortSharing) toggle, the same way
+	// the socks/http inbounds and dns-in already do. Redirected/forwarded traffic
+	// (e.g. docker bridge containers, which the PREROUTING transparent rules
+	// REDIRECT to the bridge interface address) can only reach the inbound when
+	// it listens on 0.0.0.0; since v2.4 the loopback-only default broke those
+	// flows entirely.
+	listenAddr := "127.0.0.1"
+	if t.Setting != nil && t.Setting.PortSharing {
+		listenAddr = "0.0.0.0"
+	}
 	dokodemo := coreObj.Inbound{
-		Listen:   "127.0.0.1",
+		Listen:   listenAddr,
 		Port:     port,
 		Protocol: "dokodemo-door",
 		Sniffing: coreObj.Sniffing{
